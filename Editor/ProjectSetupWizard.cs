@@ -655,6 +655,7 @@ namespace MHCockpit.VLPipe.Editor
         private static void ApplyGlobalSettings(AddressableAssetSettings s)
         {
             s.BuildRemoteCatalog = true;
+            s.EnableJsonCatalog = true;
             s.ContiguousBundles = true;
             s.NonRecursiveBuilding = true;
 
