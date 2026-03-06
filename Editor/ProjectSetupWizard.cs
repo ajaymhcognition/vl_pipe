@@ -655,27 +655,30 @@ namespace MHCockpit.VLPipe.Editor
         private static void ApplyGlobalSettings(AddressableAssetSettings s)
         {
             s.BuildRemoteCatalog = true;
+            s.EnableJsonCatalog = true; 
             s.ContiguousBundles = true;
             s.NonRecursiveBuilding = true;
 
-            // ── FIX: set the GLOBAL catalog build/load paths to Remote variables ─
-            // Without this the top-level inspector "Build & Load Paths" shows
-            // <custom> with empty path previews (as seen in the inspector screenshot).
-            // These are the catalog paths (distinct from per-group schema paths).
+            // Set GLOBAL catalog build/load paths to Remote variables
             s.RemoteCatalogBuildPath.SetVariableByName(s, PROFILE_REMOTE_BUILD);
             s.RemoteCatalogLoadPath.SetVariableByName(s, PROFILE_REMOTE_LOAD);
 
             var so = new SerializedObject(s);
             so.Update();
+
             SetSerializedBool(so, "logRuntimeExceptions", true);
-            SetSerializedInt(so, "m_InternalIdNamingMode", 0);  // Full Path
-            SetSerializedInt(so, "m_InternalBundleIdMode", 2);  // Group Guid Project Id Hash
-            SetSerializedInt(so, "m_MonoScriptBundleNaming", 1);  // Project Name Hash
-            SetSerializedInt(so, "m_ShaderBundleNaming", 1);  // Project Name Hash
+
+            // Naming settings
+            SetSerializedInt(so, "m_InternalIdNamingMode", 0);   // Full Path
+            SetSerializedInt(so, "m_InternalBundleIdMode", 2);   // Group Guid Project Id Hash
+            SetSerializedInt(so, "m_MonoScriptBundleNaming", 1); // Project Name Hash
+            SetSerializedInt(so, "m_ShaderBundleNaming", 1);     // Project Name Hash
+
             so.ApplyModifiedPropertiesWithoutUndo();
 
             EditorUtility.SetDirty(s);
-            Debug.Log("[VLab Setup] Global settings applied — catalog paths set to Remote.");
+
+            Debug.Log("[VLab Setup] Global settings applied — JSON catalog enabled.");
         }
 
         private static bool ApplyGroupSchema(AddressableAssetSettings s, string groupName)
