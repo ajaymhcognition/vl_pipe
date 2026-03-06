@@ -60,7 +60,7 @@ namespace MHCockpit.VLPipe.Editor
         //  MENU ITEM
         // ═════════════════════════════════════════════════════════════════════
 
-        [MenuItem("Tools/Virtual Lab/Build And Upload To S3")]
+        [MenuItem("Tools/Virtual Lab/Build And Upload", false, 1)]
         public static void TriggerBuildAndUpload() => _ = RunPipelineAsync();
 
         [MenuItem("Tools/Virtual Lab/Build And Upload To S3", validate = true)]

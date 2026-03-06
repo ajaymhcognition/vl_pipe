@@ -154,7 +154,7 @@ namespace MHCockpit.VLPipe.Editor
         private static readonly Color COL_DIVIDER = new Color(0.32f, 0.32f, 0.32f, 1f);
 
         // ── Menu ──────────────────────────────────────────────────────────────
-        [MenuItem("Tools/Virtual Lab/Project Setup")]
+        [MenuItem("Tools/Virtual Lab/Project Setup", false, 0)]
         public static void Open()
         {
             var w = GetWindow<ProjectSetupWizard>(false, "Virtual Lab — Project Setup", true);

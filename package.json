@@ -1,6 +1,6 @@
 {
   "name": "com.mhcockpit.vlpipe",
-  "displayName": "VLab Pipeline",
+  "displayName": "VL Pipe",
   "version": "1.0.0",
   "unity": "2022.3",
   "description": "Automated Addressables setup and deployment pipeline for MH Cockpit virtual lab modules. Scaffolds module folders, configures Addressables groups and profiles, and prepares bundles for cloud delivery.",
