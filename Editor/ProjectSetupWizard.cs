@@ -98,6 +98,7 @@ namespace MHCockpit.VLPipe.Editor
         private const string MODULES_ROOT = "Assets/Modules";
         private const string GROUP_PRACTICE = "Practice";
         private const string GROUP_EVALUATION = "Evaluation";
+        private const string COMPANY_NAME = "mhcockpit";
 
         // Profile variable names.
         // Remote.BuildPath / Remote.LoadPath are the built-in Addressables "Remote"
@@ -654,6 +655,7 @@ namespace MHCockpit.VLPipe.Editor
 #if ADDRESSABLES_INSTALLED
         private static void ApplyGlobalSettings(AddressableAssetSettings s)
         {
+            s.OverridePlayerVersion = COMPANY_NAME;
             s.BuildRemoteCatalog = true;
             s.ContiguousBundles = true;
             s.NonRecursiveBuilding = true;
