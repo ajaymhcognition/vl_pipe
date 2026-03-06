@@ -655,30 +655,39 @@ namespace MHCockpit.VLPipe.Editor
         private static void ApplyGlobalSettings(AddressableAssetSettings s)
         {
             s.BuildRemoteCatalog = true;
-            s.EnableJsonCatalog = true; 
             s.ContiguousBundles = true;
             s.NonRecursiveBuilding = true;
 
-            // Set GLOBAL catalog build/load paths to Remote variables
+            // ── FIX: set the GLOBAL catalog build/load paths to Remote variables ─
+            // Without this the top-level inspector "Build & Load Paths" shows
+            // <custom> with empty path previews (as seen in the inspector screenshot).
+            // These are the catalog paths (distinct from per-group schema paths).
             s.RemoteCatalogBuildPath.SetVariableByName(s, PROFILE_REMOTE_BUILD);
             s.RemoteCatalogLoadPath.SetVariableByName(s, PROFILE_REMOTE_LOAD);
 
             var so = new SerializedObject(s);
             so.Update();
-
             SetSerializedBool(so, "logRuntimeExceptions", true);
+            SetSerializedInt(so, "m_InternalIdNamingMode", 0);  // Full Path
+            SetSerializedInt(so, "m_InternalBundleIdMode", 2);  // Group Guid Project Id Hash
+            SetSerializedInt(so, "m_MonoScriptBundleNaming", 1);  // Project Name Hash
+            SetSerializedInt(so, "m_ShaderBundleNaming", 1);  // Project Name Hash
 
-            // Naming settings
-            SetSerializedInt(so, "m_InternalIdNamingMode", 0);   // Full Path
-            SetSerializedInt(so, "m_InternalBundleIdMode", 2);   // Group Guid Project Id Hash
-            SetSerializedInt(so, "m_MonoScriptBundleNaming", 1); // Project Name Hash
-            SetSerializedInt(so, "m_ShaderBundleNaming", 1);     // Project Name Hash
+            // ── FIX: disable catalog version suffix ───────────────────────────
+            // By default Addressables appends the Player Version to the catalog
+            // filename: catalog_0.1.0.json, catalog_1.0.0.json, etc.
+            // This makes the filename unpredictable at runtime — the Dashboard
+            // cannot know which version string to append when building the URL.
+            //
+            // Setting OverridePlayerVersion to an empty string forces Addressables
+            // to output a fixed filename: catalog.json
+            // The Dashboard S3CatalogPathTemplate then reliably ends with catalog.json.
+            SetSerializedString(so, "m_OverridePlayerVersion", "");
 
             so.ApplyModifiedPropertiesWithoutUndo();
 
             EditorUtility.SetDirty(s);
-
-            Debug.Log("[VLab Setup] Global settings applied — JSON catalog enabled.");
+            Debug.Log("[VLab Setup] Global settings applied — catalog paths set to Remote, catalog versioning disabled (output: catalog.json).");
         }
 
         private static bool ApplyGroupSchema(AddressableAssetSettings s, string groupName)
@@ -734,6 +743,13 @@ namespace MHCockpit.VLPipe.Editor
         {
             var p = so.FindProperty(field);
             if (p != null) p.intValue = v;
+            else Debug.LogWarning($"[VLab Setup] SerializedProperty '{field}' not found — skipping.");
+        }
+
+        private static void SetSerializedString(SerializedObject so, string field, string v)
+        {
+            var p = so.FindProperty(field);
+            if (p != null) p.stringValue = v;
             else Debug.LogWarning($"[VLab Setup] SerializedProperty '{field}' not found — skipping.");
         }
 
