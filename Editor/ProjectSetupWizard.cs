@@ -908,6 +908,20 @@ namespace MHCockpit.VLPipe.Editor
         /// survive the Addressables build and render correctly in the parent project.
         /// Called from RunStep6() and from BuildAndUploadToS3 before building.
         /// </summary>
+        // ── URP pass types ──────────────────────────────────────────────────
+        // URP shaders declare their passes as ScriptableRenderPipeline (lit
+        // forward, GBuffer) or ScriptableRenderPipelineDefaultUnlit (depth,
+        // shadow, meta). PassType.Normal is a legacy/built-in-pipeline pass
+        // type that URP shaders NEVER use.  Adding variants with the wrong
+        // PassType produces an SVC that looks populated but captures zero
+        // usable variants — which is the root cause of pink materials when
+        // the bundle is loaded in another project.
+        private static readonly PassType[] k_URPPassTypes = new[]
+        {
+            PassType.ScriptableRenderPipeline,             // ForwardLit, GBuffer
+            PassType.ScriptableRenderPipelineDefaultUnlit, // DepthOnly, DepthNormals, ShadowCaster, Meta
+        };
+
         internal static void PrepareModuleShaders()
         {
             string[] matGuids = AssetDatabase.FindAssets("t:Material", new[] { MODULES_ROOT });
@@ -929,11 +943,31 @@ namespace MHCockpit.VLPipe.Editor
                 if (!shaders.Contains(mat.shader))
                     shaders.Add(mat.shader);
 
-                // Add base variant (no keywords) — always safe.
-                try { svc.Add(new ShaderVariantCollection.ShaderVariant(mat.shader, PassType.Normal)); }
-                catch { /* variant already present or unsupported pass */ }
+                // ── Add variants for EVERY URP-relevant pass type ────────────
+                // Previously only PassType.Normal was used, which is incorrect
+                // for URP shaders and resulted in zero variants being captured.
+                foreach (var passType in k_URPPassTypes)
+                {
+                    // Base variant (no keywords)
+                    try { svc.Add(new ShaderVariantCollection.ShaderVariant(mat.shader, passType)); }
+                    catch { /* variant already present or pass not declared by this shader */ }
 
-                // Add the exact keyword combination active on this material.
+                    // Exact keyword combination active on this material
+                    if (mat.shaderKeywords != null && mat.shaderKeywords.Length > 0)
+                    {
+                        try
+                        {
+                            svc.Add(new ShaderVariantCollection.ShaderVariant(
+                                mat.shader, passType, mat.shaderKeywords));
+                        }
+                        catch { /* invalid keyword/pass combination — skip */ }
+                    }
+                }
+
+                // Also add PassType.Normal as a fallback for any non-URP or
+                // custom shaders that might still use the built-in pass type.
+                try { svc.Add(new ShaderVariantCollection.ShaderVariant(mat.shader, PassType.Normal)); }
+                catch { /* already present or unsupported */ }
                 if (mat.shaderKeywords != null && mat.shaderKeywords.Length > 0)
                 {
                     try
@@ -941,7 +975,7 @@ namespace MHCockpit.VLPipe.Editor
                         svc.Add(new ShaderVariantCollection.ShaderVariant(
                             mat.shader, PassType.Normal, mat.shaderKeywords));
                     }
-                    catch { /* invalid keyword combination for this shader — skip */ }
+                    catch { /* skip */ }
                 }
             }
 
@@ -1001,7 +1035,25 @@ namespace MHCockpit.VLPipe.Editor
             AddShadersToAlwaysIncluded(shaders);
 
             Debug.Log($"[VLab Setup] Shader prep complete — {shaders.Count} unique shader(s), " +
-                      $"{svc.shaderCount} variant(s) captured.");
+                      $"{svc.shaderCount} variant(s) captured (using URP pass types: " +
+                      $"ScriptableRenderPipeline + ScriptableRenderPipelineDefaultUnlit).");
+
+            // ── 4. Disable strict shader variant matching ───────────────────
+            // Unity 6 defaults to strict matching: if the exact variant is not
+            // found the material renders pink instead of falling back to a
+            // close match. For cross-project Addressable loading this is too
+            // aggressive — disable it so minor keyword mismatches don't cause
+            // pink materials. This only affects the build settings of the child
+            // project and is safe to set unconditionally.
+#if UNITY_6000_0_OR_NEWER
+            if (PlayerSettings.strictShaderVariantMatching)
+            {
+                PlayerSettings.strictShaderVariantMatching = false;
+                Debug.Log("[VLab Setup] Disabled PlayerSettings.strictShaderVariantMatching " +
+                          "(Unity 6 default). This prevents pink fallback when an exact " +
+                          "variant match is missing at runtime.");
+            }
+#endif
         }
 
         /// <summary>
@@ -1422,7 +1474,11 @@ namespace MHCockpit.VLPipe.Editor
         // Cache is per domain-load — cleared automatically on domain reload.
         private static HashSet<Shader> s_moduleShaders;
 
-        public int callbackOrder => 0;
+        // Run BEFORE URP's own shader stripping preprocessor (which uses
+        // callbackOrder = 0). A negative order guarantees we execute first
+        // and can prevent URP from removing variants that our module materials
+        // depend on.
+        public int callbackOrder => -100;
 
         private static HashSet<Shader> GetModuleShaders()
         {

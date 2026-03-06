@@ -329,6 +329,11 @@ namespace MHCockpit.VLPipe.Editor
             }
 
             Debug.Log($"[VLab S3] Build completed in {result.Duration:F2}s. ✓");
+            Debug.Log("[VLab S3] IMPORTANT — Parent project reminder:\n" +
+                      "  If materials still appear pink after loading this bundle,\n" +
+                      "  ensure the parent project has:\n" +
+                      "    1. PlayerSettings.strictShaderVariantMatching = false  (Unity 6+)\n" +
+                      "    2. Shader.WarmupAllShaders() called after Addressables.LoadSceneAsync()");
 
             string projectRoot  = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
             string buildTarget  = EditorUserBuildSettings.activeBuildTarget.ToString();
