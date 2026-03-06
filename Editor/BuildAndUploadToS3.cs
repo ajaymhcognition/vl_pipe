@@ -58,6 +58,7 @@ namespace MHCockpit.VLPipe.Editor
         private const string MODULE_CONFIG_FILENAME = "module_config.json";
         private const string MONOSCRIPTS_FRAGMENT   = "monoscripts";
         private const string BUILTIN_FRAGMENT       = "unitybuiltinassets";
+        private const string JSON_CATALOG_DEFINE    = "ENABLE_JSON_CATALOG";
 
         private readonly struct UploadFile
         {
@@ -260,10 +261,60 @@ namespace MHCockpit.VLPipe.Editor
                 return null;
             }
 
+            // Enforce remote catalog JSON output every run so parent projects can
+            // load the child catalog via a deterministic URL.
+            bool changed = false;
+            if (!settings.BuildRemoteCatalog)
+            {
+                settings.BuildRemoteCatalog = true;
+                changed = true;
+            }
+            if (!settings.EnableJsonCatalog)
+            {
+                settings.EnableJsonCatalog = true;
+                changed = true;
+            }
+            bool defineChanged = EnsureJsonCatalogDefine();
+            if (changed)
+            {
+                EditorUtility.SetDirty(settings);
+                AssetDatabase.SaveAssets();
+                Debug.Log("[VLab S3] Enabled BuildRemoteCatalog + EnableJsonCatalog before build.");
+            }
+            if (defineChanged)
+            {
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+                Debug.LogWarning(
+                    "[VLab S3] Added scripting define 'ENABLE_JSON_CATALOG' for the active target.\n" +
+                    "Unity must recompile before JSON catalogs can be generated.\n" +
+                    "Run Build And Upload again after compilation completes.");
+                EditorUtility.DisplayDialog(
+                    "Recompile Required",
+                    "Added scripting define ENABLE_JSON_CATALOG.\n\n" +
+                    "Wait for Unity to finish compiling, then run:\n" +
+                    "Tools > Virtual Lab > Build And Upload",
+                    "OK");
+                return null;
+            }
+            if (changed)
+                AssetDatabase.Refresh();
+
             // Clean first so stale bundles from a previous platform are removed.
             ShowProgress("Cleaning previous Addressables output…", 0.12f);
             Debug.Log("[VLab S3] Cleaning previous build…");
             AddressableAssetSettings.CleanPlayerContent(settings.ActivePlayerDataBuilder);
+
+            // ── Shader variant preparation ────────────────────────────────────
+            // Collect every shader used by module materials, add them to
+            // GraphicsSettings.alwaysIncludedShaders, and create/update a
+            // ShaderVariantCollection in the Practice group.
+            // Without this step, Unity strips shader variants during the
+            // Addressables build and the parent project sees pink materials
+            // when it loads the bundle at runtime.
+            ShowProgress("Preparing shader variants for module materials…", 0.15f);
+            Debug.Log("[VLab S3] Preparing shader variants…");
+            ProjectSetupWizard.PrepareModuleShaders();
 
             ShowProgress("Building Addressables — this may take several minutes…", 0.18f);
             Debug.Log("[VLab S3] Building Addressables…");
@@ -291,16 +342,42 @@ namespace MHCockpit.VLPipe.Editor
                 return null;
             }
 
-            string[] catalogFiles = Directory.GetFiles(
+            string[] jsonCatalogFiles = Directory.GetFiles(
                 outputFolder,
                 "catalog*.json",
-                SearchOption.TopDirectoryOnly);
+                SearchOption.AllDirectories);
 
-            if (catalogFiles.Length == 0)
+            if (jsonCatalogFiles.Length > 0)
             {
+                Debug.Log(
+                    "[VLab S3] Catalog JSON detected:\n" +
+                    $"  {jsonCatalogFiles[0]}");
+            }
+            else
+            {
+                string[] binCatalogFiles = Directory.GetFiles(
+                    outputFolder,
+                    "catalog*.bin",
+                    SearchOption.AllDirectories);
+
+                if (binCatalogFiles.Length > 0)
+                {
+                    Debug.LogError(
+                        "[VLab S3] JSON catalog not found. Binary catalog was produced instead:\n" +
+                        $"  {Path.GetFileName(binCatalogFiles[0])}\n\n" +
+                        "This upload is aborted because the parent bootstrap loads JSON catalogs.\n" +
+                        "Fix:\n" +
+                        "  1. Run Tools > Virtual Lab > Project Setup > Step 6.\n" +
+                        "  2. Ensure Addressables Catalog > Enable Json Catalog is ON.\n" +
+                        "  3. Rebuild and upload.");
+                    return null;
+                }
+
                 Debug.LogError(
-                    $"[VLab S3] No catalog JSON found in build output: {outputFolder}\n" +
-                    "Expected files like catalog.json or catalog_mhcockpit.json.\n" +
+                    $"[VLab S3] No catalog file found in build output: {outputFolder}\n" +
+                    "Expected one of:\n" +
+                    "  catalog*.json\n" +
+                    "  catalog*.bin\n" +
                     "Check Addressables global catalog settings in Setup Wizard Step 6.");
                 return null;
             }
@@ -663,6 +740,51 @@ namespace MHCockpit.VLPipe.Editor
             if (bytes >= 1_048_576) return $"{bytes / 1_048_576.0:F1} MB";
             if (bytes >= 1_024)     return $"{bytes / 1_024.0:F1} KB";
             return $"{bytes} B";
+        }
+
+        private static bool EnsureJsonCatalogDefine()
+        {
+#if UNITY_6000_0_OR_NEWER
+            var target = UnityEditor.Build.NamedBuildTarget.FromBuildTargetGroup(
+                BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
+            string current = PlayerSettings.GetScriptingDefineSymbols(target);
+            if (HasDefine(current, JSON_CATALOG_DEFINE))
+                return false;
+
+            string updated = string.IsNullOrEmpty(current)
+                ? JSON_CATALOG_DEFINE
+                : current + ";" + JSON_CATALOG_DEFINE;
+
+            PlayerSettings.SetScriptingDefineSymbols(target, updated);
+            return true;
+#else
+            var group = BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget);
+            string current = PlayerSettings.GetScriptingDefineSymbolsForGroup(group);
+            if (HasDefine(current, JSON_CATALOG_DEFINE))
+                return false;
+
+            string updated = string.IsNullOrEmpty(current)
+                ? JSON_CATALOG_DEFINE
+                : current + ";" + JSON_CATALOG_DEFINE;
+
+            PlayerSettings.SetScriptingDefineSymbolsForGroup(group, updated);
+            return true;
+#endif
+        }
+
+        private static bool HasDefine(string defines, string targetDefine)
+        {
+            if (string.IsNullOrWhiteSpace(defines))
+                return false;
+
+            string[] parts = defines.Split(';');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (parts[i].Trim().Equals(targetDefine, StringComparison.Ordinal))
+                    return true;
+            }
+
+            return false;
         }
     }
 }

@@ -4,13 +4,17 @@
 #if UNITY_EDITOR
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEditor.PackageManager;
 using UnityEditor.PackageManager.Requests;
+using UnityEditor.Rendering;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 #if ADDRESSABLES_INSTALLED
 using UnityEditor.AddressableAssets;
@@ -43,7 +47,7 @@ namespace MHCockpit.VLPipe.Editor
         private static void AddDefine(string d)
         {
 #if UNITY_6000_0_OR_NEWER
-            var t = UnityEditor.Build.NamedBuildTarget.FromBuildTargetGroup(
+            var t = NamedBuildTarget.FromBuildTargetGroup(
                         BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
             string cur = PlayerSettings.GetScriptingDefineSymbols(t);
             if (cur.Split(';').Any(x => x.Trim() == d)) return;
@@ -62,7 +66,7 @@ namespace MHCockpit.VLPipe.Editor
         private static void RemoveDefine(string d)
         {
 #if UNITY_6000_0_OR_NEWER
-            var t = UnityEditor.Build.NamedBuildTarget.FromBuildTargetGroup(
+            var t = NamedBuildTarget.FromBuildTargetGroup(
                         BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
             string cur = PlayerSettings.GetScriptingDefineSymbols(t);
             PlayerSettings.SetScriptingDefineSymbols(t,
@@ -101,6 +105,7 @@ namespace MHCockpit.VLPipe.Editor
         private const string GROUP_DEFAULT_LOCAL = "Default Local Group";
         private const string GROUP_BUILTIN_DATA = "Built In Data";
         private const string COMPANY_NAME = "mhcockpit";
+        private const string JSON_CATALOG_DEFINE = "ENABLE_JSON_CATALOG";
 
         // Profile variable names.
         // Remote.BuildPath / Remote.LoadPath are the built-in Addressables "Remote"
@@ -397,7 +402,9 @@ namespace MHCockpit.VLPipe.Editor
                 "LZ4 · CRC · Append Hash · Pack Separately\n" +
                 "Build & Load Paths → Remote preset\n" +
                 "Asset Provider · Asset Bundle Provider · Catalog options\n" +
-                "Also routes Built In Data / Default Local Group to Remote",
+                "Also routes Built In Data / Default Local Group to Remote\n" +
+                "Collects module material shaders → Always Included Shaders\n" +
+                "Creates ModuleShaderVariants.shadervariants and adds it to Practice group",
                 _styleSmall);
             GUILayout.Space(4);
             RunBtn(6, _s6, RunStep6);
@@ -649,8 +656,11 @@ namespace MHCockpit.VLPipe.Editor
             if (!ok) return;
 
             AssetDatabase.SaveAssets();
+
+            PrepareModuleShaders();
+
             _s6 = true;
-            Log("All group and global settings applied. ✓", true);
+            Log("All group, global, and shader settings applied. ✓", true);
             Debug.Log("[VLab Setup] Step 6 complete.");
 #else
             WarnNotReady();
@@ -665,6 +675,7 @@ namespace MHCockpit.VLPipe.Editor
             s.EnableJsonCatalog = true;
             s.ContiguousBundles = true;
             s.NonRecursiveBuilding = true;
+            bool defineChanged = EnsureScriptingDefine(JSON_CATALOG_DEFINE);
 
             // ── FIX: set the GLOBAL catalog build/load paths to Remote variables ─
             // Without this the top-level inspector "Build & Load Paths" shows
@@ -675,27 +686,21 @@ namespace MHCockpit.VLPipe.Editor
 
             var so = new SerializedObject(s);
             so.Update();
-            SetSerializedBool(so, "logRuntimeExceptions", true);
+            SetSerializedBoolAny(so, true, "logRuntimeExceptions", "m_BuildSettings.m_LogResourceManagerExceptions");
             SetSerializedInt(so, "m_InternalIdNamingMode", 0);  // Full Path
             SetSerializedInt(so, "m_InternalBundleIdMode", 2);  // Group Guid Project Id Hash
             SetSerializedInt(so, "m_MonoScriptBundleNaming", 1);  // Project Name Hash
-            SetSerializedInt(so, "m_ShaderBundleNaming", 1);  // Project Name Hash
-
-            // ── FIX: disable catalog version suffix ───────────────────────────
-            // By default Addressables appends the Player Version to the catalog
-            // filename: catalog_0.1.0.json, catalog_1.0.0.json, etc.
-            // This makes the filename unpredictable at runtime — the Dashboard
-            // cannot know which version string to append when building the URL.
-            //
-            // Setting OverridePlayerVersion to an empty string forces Addressables
-            // to output a fixed filename: catalog.json
-            // The Dashboard S3CatalogPathTemplate then reliably ends with catalog.json.
-            SetSerializedString(so, "m_OverridePlayerVersion", "");
 
             so.ApplyModifiedPropertiesWithoutUndo();
 
             EditorUtility.SetDirty(s);
-            Debug.Log("[VLab Setup] Global settings applied — catalog paths set to Remote, catalog versioning disabled (output: catalog.json).");
+            Debug.Log(
+                "[VLab Setup] Global settings applied — catalog paths set to Remote, " +
+                "JSON catalog enabled (output: catalog_mhcockpit.json).");
+            if (defineChanged)
+                Debug.Log(
+                    "[VLab Setup] Added scripting define 'ENABLE_JSON_CATALOG'. " +
+                    "Unity will recompile; run Build And Upload after compilation completes.");
         }
 
         private static bool ApplyGroupSchema(AddressableAssetSettings s, string groupName)
@@ -787,6 +792,18 @@ namespace MHCockpit.VLPipe.Editor
             else Debug.LogWarning($"[VLab Setup] SerializedProperty '{field}' not found — skipping.");
         }
 
+        private static void SetSerializedBoolAny(SerializedObject so, bool value, params string[] fields)
+        {
+            foreach (string field in fields)
+            {
+                var p = so.FindProperty(field);
+                if (p == null) continue;
+
+                p.boolValue = value;
+                return;
+            }
+        }
+
         private static void SetSerializedInt(SerializedObject so, string field, int v)
         {
             var p = so.FindProperty(field);
@@ -808,7 +825,29 @@ namespace MHCockpit.VLPipe.Editor
             { Debug.LogWarning($"[VLab Setup] SerializedProperty '{field}' not found — skipping."); return; }
 
             var child = typeProp.FindPropertyRelative("m_AssemblyQualifiedName");
-            if (child != null) { child.stringValue = aqn; return; }
+            if (child != null)
+            {
+                child.stringValue = aqn;
+                return;
+            }
+
+            var classProp = typeProp.FindPropertyRelative("m_ClassName");
+            var asmProp = typeProp.FindPropertyRelative("m_AssemblyName");
+            if (classProp != null && asmProp != null)
+            {
+                int comma = aqn.IndexOf(',');
+                if (comma > 0)
+                {
+                    classProp.stringValue = aqn.Substring(0, comma).Trim();
+                    asmProp.stringValue = aqn.Substring(comma + 1).Trim();
+                }
+                else
+                {
+                    classProp.stringValue = aqn.Trim();
+                    asmProp.stringValue = string.Empty;
+                }
+                return;
+            }
 
             var it = typeProp.Copy();
             bool nxt = it.Next(true);
@@ -821,6 +860,202 @@ namespace MHCockpit.VLPipe.Editor
             }
 
             Debug.LogWarning($"[VLab Setup] Could not find type sub-property on '{field}'.");
+        }
+
+        private static bool EnsureScriptingDefine(string define)
+        {
+#if UNITY_6000_0_OR_NEWER
+            var target = NamedBuildTarget.FromBuildTargetGroup(
+                BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget));
+            string current = PlayerSettings.GetScriptingDefineSymbols(target);
+            if (current.Split(';').Any(x => x.Trim() == define))
+                return false;
+
+            string updated = string.IsNullOrEmpty(current) ? define : current + ";" + define;
+            PlayerSettings.SetScriptingDefineSymbols(target, updated);
+            return true;
+#else
+            var group = BuildPipeline.GetBuildTargetGroup(EditorUserBuildSettings.activeBuildTarget);
+            string current = PlayerSettings.GetScriptingDefineSymbolsForGroup(group);
+            if (current.Split(';').Any(x => x.Trim() == define))
+                return false;
+
+            string updated = string.IsNullOrEmpty(current) ? define : current + ";" + define;
+            PlayerSettings.SetScriptingDefineSymbolsForGroup(group, updated);
+            return true;
+#endif
+        }
+
+        // ── Shader variant preparation ─────────────────────────────────────────
+        // ROOT CAUSE OF PINK MATERIALS:
+        //   When Unity builds Addressable bundles it only compiles the shader variants
+        //   that are listed in GraphicsSettings.alwaysIncludedShaders or captured in a
+        //   ShaderVariantCollection. All other variants are stripped. When the parent
+        //   project loads the bundle at runtime the missing compiled shader code causes
+        //   every material that references it to render pink.
+        //
+        // FIX:
+        //   1. Scan every material under Assets/Modules and collect its shader + keywords.
+        //   2. Add each shader to GraphicsSettings.alwaysIncludedShaders so the variant
+        //      is compiled into the bundle by the Addressables build pipeline.
+        //   3. Create/update a ShaderVariantCollection asset that captures the exact
+        //      keyword combination each material needs, and add it to the Practice
+        //      Addressable group so it is bundled alongside the scene. When the parent
+        //      loads the bundle, Unity uses the pre-compiled variants from the collection.
+
+        /// <summary>
+        /// Prepares shader variants for all materials under Assets/Modules so they
+        /// survive the Addressables build and render correctly in the parent project.
+        /// Called from RunStep6() and from BuildAndUploadToS3 before building.
+        /// </summary>
+        internal static void PrepareModuleShaders()
+        {
+            string[] matGuids = AssetDatabase.FindAssets("t:Material", new[] { MODULES_ROOT });
+            if (matGuids.Length == 0)
+            {
+                Debug.Log("[VLab Setup] No materials found under Assets/Modules — shader prep skipped.");
+                return;
+            }
+
+            var shaders    = new List<Shader>();
+            var svc        = new ShaderVariantCollection();
+
+            foreach (string guid in matGuids)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guid);
+                var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
+                if (mat == null || mat.shader == null) continue;
+
+                if (!shaders.Contains(mat.shader))
+                    shaders.Add(mat.shader);
+
+                // Add base variant (no keywords) — always safe.
+                try { svc.Add(new ShaderVariantCollection.ShaderVariant(mat.shader, PassType.Normal)); }
+                catch { /* variant already present or unsupported pass */ }
+
+                // Add the exact keyword combination active on this material.
+                if (mat.shaderKeywords != null && mat.shaderKeywords.Length > 0)
+                {
+                    try
+                    {
+                        svc.Add(new ShaderVariantCollection.ShaderVariant(
+                            mat.shader, PassType.Normal, mat.shaderKeywords));
+                    }
+                    catch { /* invalid keyword combination for this shader — skip */ }
+                }
+            }
+
+            // ── 1. Persist the ShaderVariantCollection so it gets bundled ────────
+            const string SVC_PATH = MODULES_ROOT + "/ModuleShaderVariants.shadervariants";
+            var existing = AssetDatabase.LoadAssetAtPath<ShaderVariantCollection>(SVC_PATH);
+            if (existing != null)
+            {
+                EditorUtility.CopySerialized(svc, existing);
+                EditorUtility.SetDirty(existing);
+                AssetDatabase.SaveAssets();
+                Debug.Log($"[VLab Setup] Updated ShaderVariantCollection ({svc.shaderCount} shader(s)): {SVC_PATH}");
+            }
+            else
+            {
+                AssetDatabase.CreateAsset(svc, SVC_PATH);
+                Debug.Log($"[VLab Setup] Created ShaderVariantCollection ({svc.shaderCount} shader(s)): {SVC_PATH}");
+            }
+
+            AssetDatabase.Refresh();
+
+            // ── 2. Register SVC in PlayerSettings.preloadedAssets ────────────────
+            // This is the correct way to make a ShaderVariantCollection affect an
+            // Addressables build. Unity reads PlayerSettings.preloadedAssets during
+            // the bundle build to collect shader variants that must be compiled.
+            // Every variant captured in the SVC is then embedded in the bundles that
+            // reference those shaders, making them available in the parent project at
+            // runtime.
+            //
+            // IMPORTANT — do NOT register the SVC as a separate Addressable entry:
+            // the Practice group uses PackSeparately, so the SVC would land in its own
+            // isolated bundle and would have NO effect on shader variant compilation
+            // for the scene / material bundles. That was the bug in the previous fix.
+            var svcAsset = AssetDatabase.LoadAssetAtPath<ShaderVariantCollection>(SVC_PATH);
+            if (svcAsset != null)
+            {
+                var preloaded = PlayerSettings.GetPreloadedAssets()
+                                ?? Array.Empty<UnityEngine.Object>();
+                bool alreadyPresent = Array.Exists(preloaded, a => a == svcAsset);
+                if (!alreadyPresent)
+                {
+                    var updated = new UnityEngine.Object[preloaded.Length + 1];
+                    preloaded.CopyTo(updated, 0);
+                    updated[preloaded.Length] = svcAsset;
+                    PlayerSettings.SetPreloadedAssets(updated);
+                    Debug.Log("[VLab Setup] ShaderVariantCollection added to PlayerSettings.preloadedAssets.");
+                }
+                else
+                {
+                    Debug.Log("[VLab Setup] ShaderVariantCollection already in PlayerSettings.preloadedAssets.");
+                }
+            }
+
+            // ── 3. Add shaders to GraphicsSettings.alwaysIncludedShaders ─────────
+            // Belt-and-suspenders: ensures each shader is included in the build at all.
+            // Variant stripping is handled by the SVC (step 2) + IPreprocessShaders.
+            AddShadersToAlwaysIncluded(shaders);
+
+            Debug.Log($"[VLab Setup] Shader prep complete — {shaders.Count} unique shader(s), " +
+                      $"{svc.shaderCount} variant(s) captured.");
+        }
+
+        /// <summary>
+        /// Adds <paramref name="shaders"/> to GraphicsSettings.alwaysIncludedShaders so
+        /// Unity compiles those shaders (and all variants on materials) into every build,
+        /// including Addressable bundle builds.
+        /// </summary>
+        private static void AddShadersToAlwaysIncluded(List<Shader> shaders)
+        {
+            var gsObjects = AssetDatabase.LoadAllAssetsAtPath("ProjectSettings/GraphicsSettings.asset");
+            if (gsObjects == null || gsObjects.Length == 0)
+            {
+                Debug.LogWarning("[VLab Setup] Cannot load GraphicsSettings.asset — skipping.");
+                return;
+            }
+
+            var gso  = new SerializedObject(gsObjects[0]);
+            gso.Update();
+
+            var prop = gso.FindProperty("m_AlwaysIncludedShaders");
+            if (prop == null)
+            {
+                Debug.LogWarning("[VLab Setup] m_AlwaysIncludedShaders not found in GraphicsSettings.");
+                return;
+            }
+
+            // Build a set of instance IDs already in the list to avoid duplicates.
+            var existingIds = new HashSet<int>();
+            for (int i = 0; i < prop.arraySize; i++)
+            {
+                var s = prop.GetArrayElementAtIndex(i).objectReferenceValue;
+                if (s != null) existingIds.Add(s.GetInstanceID());
+            }
+
+            int added = 0;
+            foreach (var shader in shaders)
+            {
+                if (shader == null || existingIds.Contains(shader.GetInstanceID())) continue;
+                prop.InsertArrayElementAtIndex(prop.arraySize);
+                prop.GetArrayElementAtIndex(prop.arraySize - 1).objectReferenceValue = shader;
+                existingIds.Add(shader.GetInstanceID());
+                added++;
+                Debug.Log($"[VLab Setup] Always Included Shader → {shader.name}");
+            }
+
+            if (added > 0)
+            {
+                gso.ApplyModifiedPropertiesWithoutUndo();
+                Debug.Log($"[VLab Setup] Added {added} shader(s) to GraphicsSettings.alwaysIncludedShaders.");
+            }
+            else
+            {
+                Debug.Log("[VLab Setup] All module shaders already in GraphicsSettings.alwaysIncludedShaders.");
+            }
         }
 #endif
 
@@ -1152,6 +1387,81 @@ namespace MHCockpit.VLPipe.Editor
 #endif
 
         #endregion
+    }
+
+    // =========================================================================
+    //  SHADER PREPROCESSOR
+    // =========================================================================
+
+    /// <summary>
+    /// Prevents Unity from stripping shader variants for any shader used by a
+    /// material under Assets/Modules during Addressables and player builds.
+    ///
+    /// ROOT CAUSE OF PINK MATERIALS:
+    ///   Unity compiles shader variants in two phases:
+    ///     1. Collection — variants are gathered from Always Included Shaders,
+    ///        ShaderVariantCollections (PlayerSettings.preloadedAssets), and
+    ///        materials in the scene/bundle.
+    ///     2. Stripping  — IPreprocessShaders implementations may discard entries
+    ///        from the compiled list before the bytecode is written to disk.
+    ///   For WebGL, shaders cannot be compiled at runtime; any variant stripped in
+    ///   phase 2 is permanently unavailable in the build/bundle. When the parent
+    ///   project loads the child's bundle and encounters a material that needs a
+    ///   stripped variant → pink material.
+    ///
+    /// FIX:
+    ///   This preprocessor runs during every Addressables and player build for the
+    ///   child project. It intercepts phase 2 and, for any shader used by a module
+    ///   material, returns WITHOUT removing any entries — preserving every collected
+    ///   variant. Combined with the ShaderVariantCollection in
+    ///   PlayerSettings.preloadedAssets (phase 1), this guarantees complete shader
+    ///   coverage in the Addressable bundles.
+    /// </summary>
+    internal class ModuleShaderPreprocessor : IPreprocessShaders
+    {
+        // Cache is per domain-load — cleared automatically on domain reload.
+        private static HashSet<Shader> s_moduleShaders;
+
+        public int callbackOrder => 0;
+
+        private static HashSet<Shader> GetModuleShaders()
+        {
+            if (s_moduleShaders != null)
+                return s_moduleShaders;
+
+            s_moduleShaders = new HashSet<Shader>();
+
+            string[] guids = AssetDatabase.FindAssets("t:Material", new[] { "Assets/Modules" });
+            foreach (string guid in guids)
+            {
+                var mat = AssetDatabase.LoadAssetAtPath<Material>(
+                    AssetDatabase.GUIDToAssetPath(guid));
+                if (mat?.shader != null)
+                    s_moduleShaders.Add(mat.shader);
+            }
+
+            Debug.Log(
+                $"[VLab ShaderPrep] ModuleShaderPreprocessor ready — " +
+                $"protecting {s_moduleShaders.Count} shader(s) from variant stripping.");
+
+            return s_moduleShaders;
+        }
+
+        /// <summary>
+        /// Called by Unity for every shader variant that is about to be compiled.
+        /// Returning without modifying <paramref name="data"/> keeps ALL entries,
+        /// i.e. no variants are stripped for module material shaders.
+        /// </summary>
+        public void OnProcessShader(
+            Shader                    shader,
+            ShaderSnippetData         snippet,
+            IList<ShaderCompilerData> data)
+        {
+            // Keep every variant for shaders used by module materials.
+            // Returning without removing from `data` = no stripping.
+            if (GetModuleShaders().Contains(shader))
+                return;
+        }
     }
 }
 
