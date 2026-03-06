@@ -657,6 +657,7 @@ namespace MHCockpit.VLPipe.Editor
         {
             s.OverridePlayerVersion = COMPANY_NAME;
             s.BuildRemoteCatalog = true;
+            s.EnableJsonCatalog = true;
             s.ContiguousBundles = true;
             s.NonRecursiveBuilding = true;
 
