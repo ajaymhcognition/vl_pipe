@@ -98,6 +98,8 @@ namespace MHCockpit.VLPipe.Editor
         private const string MODULES_ROOT = "Assets/Modules";
         private const string GROUP_PRACTICE = "Practice";
         private const string GROUP_EVALUATION = "Evaluation";
+        private const string GROUP_DEFAULT_LOCAL = "Default Local Group";
+        private const string GROUP_BUILTIN_DATA = "Built In Data";
         private const string COMPANY_NAME = "mhcockpit";
 
         // Profile variable names.
@@ -394,7 +396,8 @@ namespace MHCockpit.VLPipe.Editor
                 "Applies all settings from project config:\n" +
                 "LZ4 · CRC · Append Hash · Pack Separately\n" +
                 "Build & Load Paths → Remote preset\n" +
-                "Asset Provider · Asset Bundle Provider · Catalog options",
+                "Asset Provider · Asset Bundle Provider · Catalog options\n" +
+                "Also routes Built In Data / Default Local Group to Remote",
                 _styleSmall);
             GUILayout.Space(4);
             RunBtn(6, _s6, RunStep6);
@@ -405,7 +408,8 @@ namespace MHCockpit.VLPipe.Editor
             GUILayout.Label(
                 "Scans Assets/Modules — /Practice/ and /Evaluation/ by path.\n" +
                 "Scene file name  : topic text  (e.g. \"Comparing EMF of Two Cells\")\n" +
-                "Addressable key  : PascalCase  (e.g. \"ComparingEMFOfTwoCells\")",
+                "Practice key     : TopicPascalCase\n" +
+                "Evaluation key   : TopicPascalCase_Eval",
                 _styleSmall);
             GUILayout.Space(4);
             RunBtn(7, _s7, RunStep7);
@@ -640,7 +644,8 @@ namespace MHCockpit.VLPipe.Editor
             ApplyGlobalSettings(s);
 
             bool ok = ApplyGroupSchema(s, GROUP_PRACTICE)
-                    & ApplyGroupSchema(s, GROUP_EVALUATION);
+                    & ApplyGroupSchema(s, GROUP_EVALUATION)
+                    & ApplyBuiltInGroupSchema(s);
             if (!ok) return;
 
             AssetDatabase.SaveAssets();
@@ -733,6 +738,46 @@ namespace MHCockpit.VLPipe.Editor
             return true;
         }
 
+        /// <summary>
+        /// Ensures Unity-generated built-in bundles (monoscripts, unitybuiltinassets)
+        /// are also built to Remote paths so they are uploaded alongside scene bundles.
+        /// </summary>
+        private static bool ApplyBuiltInGroupSchema(AddressableAssetSettings s)
+        {
+            AddressableAssetGroup group =
+                s.groups.FirstOrDefault(g => g != null && g.Name == GROUP_BUILTIN_DATA)
+                ?? s.groups.FirstOrDefault(g => g != null && g.Name == GROUP_DEFAULT_LOCAL);
+
+            if (group == null)
+            {
+                Debug.LogWarning(
+                    "[VLab Setup] Could not find Built In Data / Default Local Group. " +
+                    "Skipping built-in bundle remote-path configuration.");
+                return true;
+            }
+
+            var b = group.GetSchema<BundledAssetGroupSchema>()
+                 ?? group.AddSchema<BundledAssetGroupSchema>();
+
+            b.BuildPath.SetVariableByName(s, PROFILE_REMOTE_BUILD);
+            b.LoadPath.SetVariableByName(s, PROFILE_REMOTE_LOAD);
+            b.Compression = BundledAssetGroupSchema.BundleCompressionMode.LZ4;
+            b.BundleNaming = BundledAssetGroupSchema.BundleNamingStyle.AppendHash;
+            b.UseAssetBundleCache = true;
+            b.BundleMode = BundledAssetGroupSchema.BundlePackingMode.PackTogether;
+
+            var bso = new SerializedObject(b);
+            bso.Update();
+            SetSerializedManagedType(bso, "m_BundledAssetProviderType", PROVIDER_BUNDLED_ASSET);
+            SetSerializedManagedType(bso, "m_AssetBundleProviderType", PROVIDER_ASSET_BUNDLE);
+            bso.ApplyModifiedPropertiesWithoutUndo();
+
+            EditorUtility.SetDirty(group);
+            Debug.Log(
+                $"[VLab Setup] Schema applied to '{group.Name}' — built-in bundles now use Remote paths.");
+            return true;
+        }
+
         // ── SerializedObject helpers ───────────────────────────────────────────
 
         private static void SetSerializedBool(SerializedObject so, string field, bool v)
@@ -790,8 +835,8 @@ namespace MHCockpit.VLPipe.Editor
         //   irrelevant — only the topic matters.
         //
         //   Address convention (avoids duplicate keys across groups):
-        //     Practice   scene → ToAddressableKey(topic)               e.g. "ComparingEMFOfTwoGivenPrimaryCells"
-        //     Evaluation scene → ToAddressableKey(topic)     e.g. "ComparingEMFOfTwoGivenPrimaryCells"
+        //     Practice   scene → ToAddressableKey(topic)
+        //     Evaluation scene → ToAddressableKey(topic) + "_Eval"
         private void RunStep7()
         {
 #if ADDRESSABLES_INSTALLED
@@ -833,7 +878,10 @@ namespace MHCockpit.VLPipe.Editor
                 if (string.IsNullOrEmpty(topic))
                     topic = Path.GetFileNameWithoutExtension(path);
 
-                string addressableKey = ToAddressableKey(topic);
+                string topicKey = ToAddressableKey(topic);
+                string addressableKey = target == eg
+                    ? topicKey + "_Eval"
+                    : topicKey;
                 e.address = addressableKey;
 
                 if (target == pg) pc++; else ec++;

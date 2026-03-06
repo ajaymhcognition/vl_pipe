@@ -6,6 +6,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Amazon;
 using Amazon.Runtime;
@@ -55,6 +56,20 @@ namespace MHCockpit.VLPipe.Editor
         private const string BUILD_ROOT             = "ServerData";
         private const string MODULES_ROOT           = "Assets/Modules";
         private const string MODULE_CONFIG_FILENAME = "module_config.json";
+        private const string MONOSCRIPTS_FRAGMENT   = "monoscripts";
+        private const string BUILTIN_FRAGMENT       = "unitybuiltinassets";
+
+        private readonly struct UploadFile
+        {
+            public readonly string LocalPath;
+            public readonly string RelativePath;
+
+            public UploadFile(string localPath, string relativePath)
+            {
+                LocalPath    = localPath;
+                RelativePath = relativePath;
+            }
+        }
 
         // ═════════════════════════════════════════════════════════════════════
         //  MENU ITEM
@@ -63,6 +78,7 @@ namespace MHCockpit.VLPipe.Editor
         [MenuItem("Tools/Virtual Lab/Build And Upload", false, 1)]
         public static void TriggerBuildAndUpload() => _ = RunPipelineAsync();
 
+        [MenuItem("Tools/Virtual Lab/Build And Upload", validate = true)]
         [MenuItem("Tools/Virtual Lab/Build And Upload To S3", validate = true)]
         public static bool ValidateTrigger() =>
             !EditorApplication.isCompiling && !EditorApplication.isUpdating;
@@ -275,6 +291,20 @@ namespace MHCockpit.VLPipe.Editor
                 return null;
             }
 
+            string[] catalogFiles = Directory.GetFiles(
+                outputFolder,
+                "catalog*.json",
+                SearchOption.TopDirectoryOnly);
+
+            if (catalogFiles.Length == 0)
+            {
+                Debug.LogError(
+                    $"[VLab S3] No catalog JSON found in build output: {outputFolder}\n" +
+                    "Expected files like catalog.json or catalog_mhcockpit.json.\n" +
+                    "Check Addressables global catalog settings in Setup Wizard Step 6.");
+                return null;
+            }
+
             int count = Directory.GetFiles(outputFolder, "*", SearchOption.AllDirectories).Length;
             Debug.Log($"[VLab S3] Output folder: {outputFolder}  ({count} file(s))");
             ShowProgress($"Build complete — {count} file(s) ready to upload.", 0.28f);
@@ -342,15 +372,15 @@ namespace MHCockpit.VLPipe.Editor
 
         private static async Task UploadFolderAsync(string localFolder, string s3Prefix)
         {
-            string[] allFiles = Directory.GetFiles(localFolder, "*", SearchOption.AllDirectories);
+            List<UploadFile> uploadFiles = BuildUploadManifest(localFolder);
 
-            if (allFiles.Length == 0)
+            if (uploadFiles.Count == 0)
             {
                 Debug.LogWarning("[VLab S3] Build output folder is empty — nothing to upload.");
                 return;
             }
 
-            Debug.Log($"[VLab S3] Uploading {allFiles.Length} file(s)…");
+            Debug.Log($"[VLab S3] Uploading {uploadFiles.Count} file(s)…");
             Debug.Log($"[VLab S3] Bucket : {S3_BUCKET}");
             Debug.Log($"[VLab S3] Prefix : {s3Prefix}");
             Debug.Log("[VLab S3] ────────────────────────────────────────────");
@@ -359,24 +389,20 @@ namespace MHCockpit.VLPipe.Editor
             using var s3Client = new AmazonS3Client(credentials, RegionEndpoint.GetBySystemName(AWS_REGION));
             using var transfer = new TransferUtility(s3Client);
 
-            string normalisedRoot = localFolder.TrimEnd(
-                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
             var succeeded  = new List<string>();
             var failedList = new List<string>();
 
             // Upload phase occupies progress 0.30 → 1.00
             const float UPLOAD_START = 0.30f;
             const float UPLOAD_RANGE = 0.70f;
-            float       slicePerFile = UPLOAD_RANGE / Math.Max(allFiles.Length, 1);
+            float       slicePerFile = UPLOAD_RANGE / Math.Max(uploadFiles.Count, 1);
 
-            for (int i = 0; i < allFiles.Length; i++)
+            for (int i = 0; i < uploadFiles.Count; i++)
             {
-                string filePath     = allFiles[i];
+                UploadFile item     = uploadFiles[i];
+                string filePath     = item.LocalPath;
                 string fileName     = Path.GetFileName(filePath);
-                string relativePath = filePath
-                    .Substring(normalisedRoot.Length + 1)
-                    .Replace('\\', '/');
+                string relativePath = item.RelativePath;
                 string s3Key    = s3Prefix + relativePath;
                 long   fileSize = new FileInfo(filePath).Length;
 
@@ -384,11 +410,11 @@ namespace MHCockpit.VLPipe.Editor
 
                 // ── Progress bar: start of this file ──────────────────────────
                 ShowProgress(
-                    $"Uploading  [{i + 1} / {allFiles.Length}]  {fileName}",
+                    $"Uploading  [{i + 1} / {uploadFiles.Count}]  {fileName}",
                     fileBaseProgress,
                     $"s3://{S3_BUCKET}/{s3Key}  ({FormatBytes(fileSize)})");
 
-                Debug.Log($"[VLab S3] [{i + 1}/{allFiles.Length}] {fileName}" +
+                Debug.Log($"[VLab S3] [{i + 1}/{uploadFiles.Count}] {fileName}" +
                           $"  ({FormatBytes(fileSize)})  →  {s3Key}");
 
                 try
@@ -418,7 +444,7 @@ namespace MHCockpit.VLPipe.Editor
                         float overall = fileBaseProgress + withinFile * slicePerFile;
 
                         ShowProgress(
-                            $"Uploading  [{i + 1} / {allFiles.Length}]  " +
+                            $"Uploading  [{i + 1} / {uploadFiles.Count}]  " +
                             $"{fileName}  {args.PercentDone}%",
                             overall,
                             $"{FormatBytes(args.TransferredBytes)} / {FormatBytes(fileSize)}" +
@@ -480,6 +506,110 @@ namespace MHCockpit.VLPipe.Editor
                     $"Failed files:\n  {string.Join("\n  ", failedList)}\n\n" +
                     "See the Console window for full error details.",
                     "OK");
+            }
+        }
+
+        private static List<UploadFile> BuildUploadManifest(string localFolder)
+        {
+            var manifest = new List<UploadFile>();
+
+            if (!Directory.Exists(localFolder))
+                return manifest;
+
+            string normalisedRoot = localFolder.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            foreach (string filePath in Directory.GetFiles(localFolder, "*", SearchOption.AllDirectories))
+            {
+                string relativePath = filePath
+                    .Substring(normalisedRoot.Length + 1)
+                    .Replace('\\', '/');
+
+                manifest.Add(new UploadFile(filePath, relativePath));
+            }
+
+            AppendFallbackBuiltInBundles(manifest);
+            return manifest;
+        }
+
+        private static void AppendFallbackBuiltInBundles(List<UploadFile> manifest)
+        {
+            bool hasMonoscripts = manifest.Any(f =>
+                Path.GetFileName(f.LocalPath)
+                    .IndexOf(MONOSCRIPTS_FRAGMENT, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            bool hasBuiltinAssets = manifest.Any(f =>
+                Path.GetFileName(f.LocalPath)
+                    .IndexOf(BUILTIN_FRAGMENT, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            if (hasMonoscripts && hasBuiltinAssets)
+                return;
+
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string buildTarget = EditorUserBuildSettings.activeBuildTarget.ToString();
+            string fallbackDir = Path.Combine(
+                projectRoot,
+                "Library",
+                "com.unity.addressables",
+                "aa",
+                buildTarget);
+
+            if (!Directory.Exists(fallbackDir))
+            {
+                Debug.LogWarning(
+                    $"[VLab S3] Fallback bundle folder not found: {fallbackDir}\n" +
+                    "If child bundles fail to load at runtime, run Setup Wizard Step 6 " +
+                    "to force built-in groups to Remote paths, then rebuild.");
+                return;
+            }
+
+            string[] candidates = Directory.GetFiles(
+                fallbackDir,
+                "*.bundle",
+                SearchOption.AllDirectories);
+
+            foreach (string bundlePath in candidates)
+            {
+                string fileName = Path.GetFileName(bundlePath);
+
+                bool isMonoscripts = fileName.IndexOf(
+                    MONOSCRIPTS_FRAGMENT,
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+
+                bool isBuiltin = fileName.IndexOf(
+                    BUILTIN_FRAGMENT,
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+
+                bool needed = (!hasMonoscripts && isMonoscripts)
+                              || (!hasBuiltinAssets && isBuiltin);
+
+                if (!needed)
+                    continue;
+
+                bool alreadyPresent = manifest.Any(f =>
+                    Path.GetFileName(f.LocalPath).Equals(fileName, StringComparison.OrdinalIgnoreCase));
+
+                if (alreadyPresent)
+                    continue;
+
+                manifest.Add(new UploadFile(bundlePath, fileName));
+                Debug.Log(
+                    $"[VLab S3] Added fallback built-in bundle to upload manifest: {fileName}");
+            }
+
+            bool stillMissingMonoscripts = !manifest.Any(f =>
+                Path.GetFileName(f.LocalPath)
+                    .IndexOf(MONOSCRIPTS_FRAGMENT, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            bool stillMissingBuiltin = !manifest.Any(f =>
+                Path.GetFileName(f.LocalPath)
+                    .IndexOf(BUILTIN_FRAGMENT, StringComparison.OrdinalIgnoreCase) >= 0);
+
+            if (stillMissingMonoscripts || stillMissingBuiltin)
+            {
+                Debug.LogWarning(
+                    "[VLab S3] Built-in dependency bundles are still missing from upload manifest.\n" +
+                    "This can cause remote scene load failures. Re-run Project Setup Step 6 and rebuild.");
             }
         }
 
