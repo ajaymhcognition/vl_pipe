@@ -285,8 +285,60 @@ namespace MHCockpit.VLPipe.Editor
         //  STEP 4 — S3 UPLOAD
         // ═════════════════════════════════════════════════════════════════════
 
+        /// <summary>
+        /// Builds the S3 key prefix for this module's upload folder.
+        ///
+        /// The topic is converted to PascalCase using the same ToAddressableKey() logic
+        /// that ProjectSetupWizard uses when registering scenes in the Addressables Groups window.
+        /// This ensures the S3 folder name matches the Addressable key exactly, so the
+        /// Dashboard can derive the correct catalog URL from the key at runtime.
+        ///
+        /// Example:
+        ///   topic (raw)    : "Comparing EMF of two given primary cells"
+        ///   topic (S3 path): "ComparingEMFOfTwoGivenPrimaryCells"
+        ///   S3 prefix      : Modules/CBSE/Grade12/Physics/ComparingEMFOfTwoGivenPrimaryCells/WebGL/
+        /// </summary>
         private static string BuildS3Prefix(ModuleConfig cfg, string buildTarget) =>
-            $"Modules/{cfg.board}/{cfg.grade}/{cfg.subject}/{cfg.topic}/{buildTarget}/";
+            $"Modules/{cfg.board}/{cfg.grade}/{cfg.subject}/{ToAddressableKey(cfg.topic)}/{buildTarget}/";
+
+        /// <summary>
+        /// Converts a raw topic string to a PascalCase Addressable key segment.
+        /// Identical to the same method in ProjectSetupWizard.cs — kept in sync manually.
+        ///
+        /// Rules:
+        ///   • Splits on spaces, hyphens, and underscores.
+        ///   • Capitalises the first character of each word segment.
+        ///   • Preserves existing upper-case runs (e.g. "EMF" stays "EMF").
+        ///   • Strips all non-alphanumeric characters from each segment.
+        ///
+        /// Examples:
+        ///   "Comparing EMF of two given primary cells" → "ComparingEMFOfTwoGivenPrimaryCells"
+        ///   "simple pendulum"                         → "SimplePendulum"
+        ///   "Ohm's Law - Experiment 1"                → "OhmsLawExperiment1"
+        /// </summary>
+        private static string ToAddressableKey(string topic)
+        {
+            if (string.IsNullOrWhiteSpace(topic)) return topic;
+
+            string[] words = topic.Split(
+                new[] { ' ', '-', '_', '\t' },
+                StringSplitOptions.RemoveEmptyEntries);
+
+            var sb = new System.Text.StringBuilder(topic.Length);
+            foreach (string word in words)
+            {
+                var clean = new System.Text.StringBuilder(word.Length);
+                foreach (char c in word)
+                    if (char.IsLetterOrDigit(c)) clean.Append(c);
+
+                if (clean.Length == 0) continue;
+
+                sb.Append(char.ToUpperInvariant(clean[0]));
+                if (clean.Length > 1) sb.Append(clean.ToString(1, clean.Length - 1));
+            }
+
+            return sb.ToString();
+        }
 
         private static async Task UploadFolderAsync(string localFolder, string s3Prefix)
         {
