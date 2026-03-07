@@ -892,117 +892,83 @@ namespace MHCockpit.VLPipe.Editor
 
 #if ADDRESSABLES_INSTALLED
         /// <summary>
-        /// Scans all materials under Assets/Modules, builds a
-        /// ShaderVariantCollection covering URP pass types, registers it in
-        /// PlayerSettings.preloadedAssets, and adds shaders to
-        /// GraphicsSettings.alwaysIncludedShaders.
-        ///
-        /// Called from Step 6 and from the build pipeline before building.
+        /// Scans module materials and writes a ShaderVariantCollection at:
+        /// Assets/Modules/ModuleShaderVariants.shadervariants
         /// </summary>
-        internal static void PrepareModuleShaders()
+        public static void PrepareModuleShaders()
         {
-            // Scan the ENTIRE project for materials — not just Assets/Modules.
-            // Scene materials often live in Packages (URP defaults), Assets/Materials,
-            // or are embedded in FBX imports under Assets/Models, etc.
-            // This is a dedicated game module project so every material in it
-            // is potentially referenced by the scenes we are bundling.
-            string[] matGuids = AssetDatabase.FindAssets("t:Material");
-            if (matGuids.Length == 0)
+            // FIX: Shader variant support
+            var svc = AssetDatabase.LoadAssetAtPath<ShaderVariantCollection>(SVC_PATH);
+            if (svc == null)
             {
-                Debug.Log("[GameModule] No materials found in project — shader prep skipped.");
-                return;
+                // FIX: Shader variant support
+                string dir = Path.GetDirectoryName(SVC_PATH);
+                if (!string.IsNullOrEmpty(dir) && !AssetDatabase.IsValidFolder(dir))
+                {
+                    string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+                    Directory.CreateDirectory(Path.Combine(projectRoot, dir));
+                    AssetDatabase.Refresh();
+                }
+
+                svc = new ShaderVariantCollection();
+                AssetDatabase.CreateAsset(svc, SVC_PATH);
             }
 
-            var shaders = new List<Shader>();
-            var svc     = new ShaderVariantCollection();
+            // FIX: Shader variant support
+            svc.Clear();
+
+            // FIX: Shader variant support
+            string[] matGuids = AssetDatabase.FindAssets("t:Material", new[] { MODULES_ROOT });
+            var shaders = new HashSet<Shader>();
 
             foreach (string guid in matGuids)
             {
+                // FIX: Shader variant support
                 string path = AssetDatabase.GUIDToAssetPath(guid);
                 var mat = AssetDatabase.LoadAssetAtPath<Material>(path);
                 if (mat == null || mat.shader == null) continue;
 
-                if (!shaders.Contains(mat.shader))
-                    shaders.Add(mat.shader);
+                // FIX: Shader variant support
+                shaders.Add(mat.shader);
 
-                // URP pass types.
-                foreach (var pt in k_URPPassTypes)
+                try
                 {
-                    try { svc.Add(new ShaderVariantCollection.ShaderVariant(mat.shader, pt)); }
-                    catch { /* pass not declared */ }
-
-                    if (mat.shaderKeywords is { Length: > 0 })
-                    {
-                        try { svc.Add(new ShaderVariantCollection.ShaderVariant(
-                                  mat.shader, pt, mat.shaderKeywords)); }
-                        catch { /* invalid combo */ }
-                    }
+                    // FIX: Shader variant support
+                    svc.Add(new ShaderVariantCollection.ShaderVariant(
+                        mat.shader, PassType.ScriptableRenderPipeline));
+                }
+                catch
+                {
+                    // FIX: Shader variant support
+                    // Ignore shaders that do not expose this pass.
                 }
 
-                // Fallback: PassType.Normal for non-URP / custom shaders.
-                try { svc.Add(new ShaderVariantCollection.ShaderVariant(
-                          mat.shader, PassType.Normal)); }
-                catch { }
-
+                // FIX: Shader variant support
                 if (mat.shaderKeywords is { Length: > 0 })
                 {
-                    try { svc.Add(new ShaderVariantCollection.ShaderVariant(
-                              mat.shader, PassType.Normal, mat.shaderKeywords)); }
-                    catch { }
+                    try
+                    {
+                        // FIX: Shader variant support
+                        svc.Add(new ShaderVariantCollection.ShaderVariant(
+                            mat.shader, PassType.ScriptableRenderPipeline, mat.shaderKeywords));
+                    }
+                    catch
+                    {
+                        // FIX: Shader variant support
+                        // Ignore invalid keyword combinations for this shader/pass.
+                    }
                 }
             }
 
-            // 1. Persist the SVC asset.
-            var existing = AssetDatabase.LoadAssetAtPath<ShaderVariantCollection>(SVC_PATH);
-            if (existing != null)
-            {
-                EditorUtility.CopySerialized(svc, existing);
-                EditorUtility.SetDirty(existing);
-                AssetDatabase.SaveAssets();
-            }
-            else
-            {
-                string dir = Path.GetDirectoryName(SVC_PATH);
-                if (!string.IsNullOrEmpty(dir) && !AssetDatabase.IsValidFolder(dir))
-                    Directory.CreateDirectory(
-                        Path.Combine(Application.dataPath, "..", dir));
-                AssetDatabase.CreateAsset(svc, SVC_PATH);
-            }
+            // FIX: Shader variant support
+            EditorUtility.SetDirty(svc);
+            AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
-            // 2. Register in PlayerSettings.preloadedAssets.
-            //    This is the CORRECT way to affect Addressables builds.
-            //    Do NOT add the SVC as an Addressable entry — PackSeparately
-            //    would isolate it in its own bundle where it has zero effect.
-            var svcAsset = AssetDatabase.LoadAssetAtPath<ShaderVariantCollection>(SVC_PATH);
-            if (svcAsset != null)
-            {
-                var preloaded = PlayerSettings.GetPreloadedAssets()
-                             ?? Array.Empty<UnityEngine.Object>();
-                if (!Array.Exists(preloaded, a => a == svcAsset))
-                {
-                    var updated = new UnityEngine.Object[preloaded.Length + 1];
-                    preloaded.CopyTo(updated, 0);
-                    updated[preloaded.Length] = svcAsset;
-                    PlayerSettings.SetPreloadedAssets(updated);
-                    Debug.Log("[GameModule] SVC added to PlayerSettings.preloadedAssets.");
-                }
-            }
-
-            // 3. Always Included Shaders.
-            AddShadersToAlwaysIncluded(shaders);
-
-            // 4. Disable strict shader variant matching (Unity 6 default).
-#if UNITY_6000_0_OR_NEWER
-            if (PlayerSettings.strictShaderVariantMatching)
-            {
-                PlayerSettings.strictShaderVariantMatching = false;
-                Debug.Log("[GameModule] Disabled strictShaderVariantMatching.");
-            }
-#endif
-
-            Debug.Log($"[GameModule] Shader prep done — {shaders.Count} shader(s), " +
-                      $"{svc.shaderCount} variant entry/entries.");
+            // FIX: Shader variant support
+            Debug.Log(
+                $"[GameModule] Shader variants prepared. Materials: {matGuids.Length}, " +
+                $"Shaders: {shaders.Count}, Collection: {SVC_PATH}");
         }
 
         private static void AddShadersToAlwaysIncluded(List<Shader> shaders)

@@ -64,6 +64,13 @@ namespace MHCockpit.VLPipe.Editor
         private const string MONOSCRIPTS_FRAG    = "monoscripts";
         private const string BUILTIN_FRAG        = "unitybuiltinassets";
         private const string JSON_CATALOG_DEFINE = "ENABLE_JSON_CATALOG";
+        // FIX: Shader variant support
+        private const string REMOTE_SCENES_GROUP = "RemoteScenes";
+        // FIX: Shader variant support
+        private const string SHADER_VARIANTS_ASSET_PATH =
+            "Assets/Modules/ModuleShaderVariants.shadervariants";
+        // FIX: Shader variant support
+        private const string SHADER_VARIANTS_ADDRESS = "shader_variants";
 
         [Serializable]
         private class ModuleConfig
@@ -268,7 +275,15 @@ namespace MHCockpit.VLPipe.Editor
             // ── Shader preparation ────────────────────────────────────────
             ShowProgress("Preparing shader variants…", 0.15f);
             Debug.Log("[Build] Preparing shader variants…");
+            // FIX: Shader variant support
             GameModuleSetup.PrepareModuleShaders();
+            // FIX: Shader variant support
+            if (!EnsureShaderVariantsAddressable(settings))
+            {
+                Debug.LogError(
+                    $"[Build] Failed to add '{SHADER_VARIANTS_ASSET_PATH}' to '{REMOTE_SCENES_GROUP}'.");
+                return null;
+            }
 
             // ── Build ─────────────────────────────────────────────────────
             ShowProgress("Building Addressables — may take several minutes…", 0.18f);
@@ -322,6 +337,46 @@ namespace MHCockpit.VLPipe.Editor
             Debug.Log($"[Build] Output: {outputFolder}  ({count} files)");
             ShowProgress($"Build done — {count} file(s) ready.", 0.28f);
             return outputFolder;
+        }
+
+        // FIX: Shader variant support
+        private static bool EnsureShaderVariantsAddressable(AddressableAssetSettings settings)
+        {
+            // FIX: Shader variant support
+            string guid = AssetDatabase.AssetPathToGUID(SHADER_VARIANTS_ASSET_PATH);
+            if (string.IsNullOrWhiteSpace(guid))
+            {
+                Debug.LogError($"[Build] Shader variant asset not found: {SHADER_VARIANTS_ASSET_PATH}");
+                return false;
+            }
+
+            // FIX: Shader variant support
+            var group = settings.groups.FirstOrDefault(g =>
+                g != null && g.Name == REMOTE_SCENES_GROUP);
+            if (group == null)
+            {
+                Debug.LogError($"[Build] Addressables group '{REMOTE_SCENES_GROUP}' not found.");
+                return false;
+            }
+
+            // FIX: Shader variant support
+            var entry = settings.CreateOrMoveEntry(guid, group, false, false);
+            if (entry == null)
+            {
+                Debug.LogError("[Build] Failed to create Addressables entry for shader variants.");
+                return false;
+            }
+
+            // FIX: Shader variant support
+            entry.address = SHADER_VARIANTS_ADDRESS;
+            EditorUtility.SetDirty(group);
+            EditorUtility.SetDirty(settings);
+            AssetDatabase.SaveAssets();
+
+            // FIX: Shader variant support
+            Debug.Log(
+                $"[Build] Shader variants ensured in '{REMOTE_SCENES_GROUP}' as '{SHADER_VARIANTS_ADDRESS}'.");
+            return true;
         }
 
         // ═══════════════════════════════════════════════════════════════════
