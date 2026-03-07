@@ -901,10 +901,15 @@ namespace MHCockpit.VLPipe.Editor
         /// </summary>
         internal static void PrepareModuleShaders()
         {
-            string[] matGuids = AssetDatabase.FindAssets("t:Material", new[] { MODULES_ROOT });
+            // Scan the ENTIRE project for materials — not just Assets/Modules.
+            // Scene materials often live in Packages (URP defaults), Assets/Materials,
+            // or are embedded in FBX imports under Assets/Models, etc.
+            // This is a dedicated game module project so every material in it
+            // is potentially referenced by the scenes we are bundling.
+            string[] matGuids = AssetDatabase.FindAssets("t:Material");
             if (matGuids.Length == 0)
             {
-                Debug.Log("[GameModule] No materials under Assets/Modules — shader prep skipped.");
+                Debug.Log("[GameModule] No materials found in project — shader prep skipped.");
                 return;
             }
 
@@ -1229,47 +1234,43 @@ namespace MHCockpit.VLPipe.Editor
     }
 
     // ========================================================================
-    //  SHADER PREPROCESSOR — prevents URP from stripping module variants
+    //  SHADER PREPROCESSOR — prevents URP from stripping ANY variant
     // ========================================================================
 
     /// <summary>
     /// IPreprocessShaders callback that runs BEFORE URP's own stripper
-    /// (callbackOrder = -100 vs URP's 0). For any shader referenced by a
-    /// material under Assets/Modules, ALL variants are preserved — preventing
-    /// the pink-material problem when bundles load in the Dashboard project.
+    /// (callbackOrder = -100 vs URP's 0).
+    ///
+    /// ROOT CAUSE OF PINK MATERIALS:
+    ///   This is a DEDICATED game module project. Its sole purpose is to produce
+    ///   Addressable bundles loaded by a DIFFERENT project (the Dashboard).
+    ///   The Dashboard has its own URP installation with a different set of compiled
+    ///   shader variants. When Unity's build pipeline strips variants from the module
+    ///   bundles, those shaders cannot render in the Dashboard → pink materials.
+    ///
+    /// FIX:
+    ///   Protect ALL shaders unconditionally. In a dedicated module project there is
+    ///   no benefit to stripping — every variant that survives the build is needed
+    ///   at runtime in the Dashboard. The small increase in bundle size is vastly
+    ///   preferable to pink materials.
     /// </summary>
     internal class ModuleShaderPreprocessor : IPreprocessShaders
     {
-        private static HashSet<Shader> s_cache;
         public int callbackOrder => -100;
 
-        private static HashSet<Shader> GetModuleShaders()
-        {
-            if (s_cache != null) return s_cache;
-            s_cache = new HashSet<Shader>();
-
-            string[] guids = AssetDatabase.FindAssets("t:Material",
-                new[] { "Assets/Modules" });
-            foreach (string guid in guids)
-            {
-                var mat = AssetDatabase.LoadAssetAtPath<Material>(
-                    AssetDatabase.GUIDToAssetPath(guid));
-                if (mat?.shader != null)
-                    s_cache.Add(mat.shader);
-            }
-
-            Debug.Log($"[GameModule] ShaderPreprocessor — " +
-                      $"protecting {s_cache.Count} shader(s).");
-            return s_cache;
-        }
-
+        /// <summary>
+        /// Called by Unity for every shader variant about to be compiled.
+        /// Returning WITHOUT modifying <paramref name="data"/> = zero stripping.
+        /// We protect every shader unconditionally because this is a dedicated
+        /// module project — there is no "local" rendering to optimise for.
+        /// </summary>
         public void OnProcessShader(
             Shader shader,
             ShaderSnippetData snippet,
             IList<ShaderCompilerData> data)
         {
-            // Return without modifying `data` → zero stripping.
-            if (GetModuleShaders().Contains(shader)) return;
+            // Intentionally empty — never strip any variant.
+            // Every variant compiled here may be needed by the Dashboard project.
         }
     }
 }
