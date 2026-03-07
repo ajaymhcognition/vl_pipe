@@ -301,7 +301,7 @@ namespace MHCockpit.VLPipe.Editor
             Debug.Log($"[Build] Build completed in {result.Duration:F2}s. ✓");
             Debug.Log("[Build] Dashboard reminder:\n" +
                       "  1. PlayerSettings.strictShaderVariantMatching = false (Unity 6+)\n" +
-                      "  2. Call Shader.WarmupAllShaders() after Addressables.LoadSceneAsync()");
+                      "  2. Ensure Dashboard.SceneLoader.LoadShadersAsync() runs before scene load.");
 
             // ── Validate output ───────────────────────────────────────────
             string buildTarget  = EditorUserBuildSettings.activeBuildTarget.ToString();
@@ -329,6 +329,21 @@ namespace MHCockpit.VLPipe.Editor
                     return null;
                 }
                 Debug.LogError("[Build] No catalog file found in output.");
+                return null;
+            }
+
+            // FIX: Shader variant support
+            bool hasShaderVariants = jsonCatalogs.Any(CatalogContainsShaderVariantsAddress);
+            if (!hasShaderVariants)
+            {
+                Debug.LogError(
+                    $"[Build] Catalog is missing shader variants key '{SHADER_VARIANTS_ADDRESS}'. " +
+                    "Addressables were built without ModuleShaderVariants in the catalog.");
+                EditorUtility.DisplayDialog(
+                    "Build Failed",
+                    "Shader variants key is missing in generated catalog.\n\n" +
+                    "Run setup again and rebuild before upload.",
+                    "OK");
                 return null;
             }
 
@@ -382,6 +397,26 @@ namespace MHCockpit.VLPipe.Editor
         // ═══════════════════════════════════════════════════════════════════
         //  4. S3 UPLOAD
         // ═══════════════════════════════════════════════════════════════════
+
+        // FIX: Shader variant support
+        private static bool CatalogContainsShaderVariantsAddress(string catalogPath)
+        {
+            if (!File.Exists(catalogPath))
+                return false;
+
+            try
+            {
+                // FIX: Shader variant support
+                string json = File.ReadAllText(catalogPath);
+                return json.IndexOf($"\"{SHADER_VARIANTS_ADDRESS}\"", StringComparison.Ordinal) >= 0 ||
+                       json.IndexOf("ModuleShaderVariants", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Build] Could not inspect catalog '{catalogPath}': {ex.Message}");
+                return false;
+            }
+        }
 
         /// <summary>
         /// S3 prefix uses PascalCase topic to match the convention expected by
